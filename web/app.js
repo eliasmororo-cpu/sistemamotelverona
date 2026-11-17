@@ -1,4 +1,8 @@
-'use strict';
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config.js';
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const DOMINIO_LOGIN = '@motel.local';
 
 // ---------- Utilidades ----------
 const $ = (s, el = document) => el.querySelector(s);
@@ -11,17 +15,21 @@ const hojeISO = () => new Date().toLocaleDateString('sv-SE');
 const FORMAS = { dinheiro: 'Dinheiro', pix: 'Pix', debito: 'Débito', credito: 'Crédito' };
 const STATUS = { livre: 'Livre', ocupado: 'Ocupado', limpeza: 'Limpeza', manutencao: 'Manutenção' };
 
-async function api(metodo, url, corpo) {
-  const r = await fetch(url, {
-    method: metodo,
-    headers: corpo ? { 'Content-Type': 'application/json' } : {},
-    body: corpo ? JSON.stringify(corpo) : undefined,
-    credentials: 'same-origin',
-  });
-  const dados = await r.json().catch(() => ({}));
-  if (r.status === 401 && url !== '/api/login') { estado.usuario = null; render(); }
-  if (!r.ok) throw new Error(dados.erro || 'Falha de comunicação');
-  return dados;
+// Chama uma função do banco (Supabase). Toda regra de negócio roda lá, não no celular.
+async function rpc(nome, args = {}) {
+  const { data, error } = await supabase.rpc(nome, args);
+  if (error) {
+    if (/JWT|login novamente/i.test(error.message)) { estado.usuario = null; render(); }
+    throw new Error(error.message);
+  }
+  // Funções sem retorno (void) voltam vazias: trata como sucesso.
+  return data === null || data === undefined || data === '' ? true : data;
+}
+
+async function carregarUsuario() {
+  const { data } = await supabase.auth.getSession();
+  if (!data.session) return null;
+  try { return await rpc('eu_perfil'); } catch { await supabase.auth.signOut(); return null; }
 }
 
 function aviso(msg, erro = false) {
@@ -73,7 +81,7 @@ function render() {
 
 // ---------- Quartos ----------
 async function telaQuartos() {
-  const [painel, tabela] = await Promise.all([api('GET', '/api/painel'), estado.tabela || api('GET', '/api/tabela')]);
+  const [painel, tabela] = await Promise.all([rpc('painel'), estado.tabela || rpc('tabela')]);
   estado.painel = painel; estado.tabela = tabela;
   if (estado.aba !== 'quartos') return;
   const c = $('#conteudo');
@@ -124,7 +132,7 @@ function modalEntrada(q) {
   const opcoes = (cat?.periodos || []).map((p) => `<button type="button" class="opcao" data-acao="opcao" data-tipo="periodo" data-periodo="${p.id}">
       <b>${esc(p.nome)}</b>${brl(p.preco)}</button>`).join('')
     + (cat?.pernoite_preco > 0 ? `<button type="button" class="opcao" data-acao="opcao" data-tipo="pernoite">
-      <b>Pernoite</b>${brl(cat.pernoite_preco)} · até ${esc(cat.pernoite_fim)}</button>` : '');
+      <b>Pernoite</b>${brl(cat.pernoite_preco)} · até ${esc(String(cat.pernoite_fim).slice(0, 5))}</button>` : '');
   abrirModal(`<h2>Entrada · Quarto ${esc(q.numero)}</h2>
     <form data-form="entrada" data-quarto="${q.id}">
       <label>Placa do carro</label>
@@ -139,7 +147,7 @@ function modalEntrada(q) {
 }
 
 async function modalOcupado(q) {
-  const conta = await tentar(() => api('GET', `/api/locacoes/${q.locacao.id}/conta`));
+  const conta = await tentar(() => rpc('conta_locacao', { p_locacao: q.locacao.id }));
   if (!conta) return;
   const l = q.locacao;
   abrirModal(`<h2>Quarto ${esc(q.numero)} · ${esc(l.periodo_nome)}</h2>
@@ -177,7 +185,7 @@ function modalConsumo(locId) {
 }
 
 async function modalFecharConta(locId) {
-  const conta = await tentar(() => api('GET', `/api/locacoes/${locId}/conta`));
+  const conta = await tentar(() => rpc('conta_locacao', { p_locacao: locId }));
   if (!conta) return;
   abrirModal(`<h2>Fechar conta · Quarto ${esc(conta.quarto)}</h2>
     <p>Saída ${hora(conta.saida)} · Permanência ${duracao(conta.minutos)}</p>
@@ -187,7 +195,7 @@ async function modalFecharConta(locId) {
         <label>Valor do desconto (R$)</label><input name="desconto" type="number" step="0.01" min="0" inputmode="decimal">
         <label>Motivo</label><input name="desconto_motivo">
         <div class="linha"><div><label>Login do gerente</label><input name="ger_login" autocapitalize="none"></div>
-        <div><label>Senha do gerente</label><input name="ger_senha" type="password"></div></div>
+        <div><label>PIN do gerente</label><input name="ger_senha" type="password" inputmode="numeric"></div></div>
       </details>
       <h3>Pagamento · <span id="a-pagar">${brl(conta.total)}</span></h3>
       ${Object.entries(FORMAS).map(([k, n]) => `<div class="linha" style="align-items:center"><span>${n}</span>
@@ -207,7 +215,7 @@ function modalCancelar(locId) {
     <form data-form="cancelar" data-loc="${locId}">
       <label>Motivo</label><input name="motivo" required>
       <div class="linha"><div><label>Login do gerente</label><input name="ger_login" autocapitalize="none" required></div>
-      <div><label>Senha do gerente</label><input name="ger_senha" type="password" required></div></div>
+      <div><label>PIN do gerente</label><input name="ger_senha" type="password" inputmode="numeric" required></div></div>
       <div class="acoes"><button class="perigo">Confirmar cancelamento</button></div></form>`);
 }
 
@@ -216,13 +224,13 @@ function modalEstornar(consumoId) {
     <form data-form="estornar" data-id="${consumoId}">
       <label>Motivo</label><input name="motivo" required>
       <div class="linha"><div><label>Login do gerente</label><input name="ger_login" autocapitalize="none" required></div>
-      <div><label>Senha do gerente</label><input name="ger_senha" type="password" required></div></div>
+      <div><label>PIN do gerente</label><input name="ger_senha" type="password" inputmode="numeric" required></div></div>
       <div class="acoes"><button class="perigo">Estornar</button></div></form>`);
 }
 
 // ---------- Caixa ----------
 async function telaCaixa() {
-  const cx = await api('GET', '/api/caixa');
+  const cx = await rpc('meu_caixa');
   if (estado.aba !== 'caixa') return;
   const c = $('#conteudo');
   if (!cx.aberto) {
@@ -235,8 +243,8 @@ async function telaCaixa() {
   }
   c.innerHTML = `<div class="cartao"><h2>Caixa aberto às ${hora(cx.aberto_em)}</h2>
       <p>Troco inicial ${brl(cx.valor_inicial)} · ${cx.locacoes} locação(ões) recebida(s)</p>
-      ${cx.porForma.length ? `<table>${cx.porForma.map((f) => `<tr><td>${FORMAS[f.forma]}</td><td class="n">${brl(f.total)}</td></tr>`).join('')}</table>` : ''}
-      ${cx.esperadoDinheiro !== undefined ? `<p>Dinheiro esperado na gaveta: <b>${brl(cx.esperadoDinheiro)}</b></p>` : ''}
+      ${cx.por_forma.length ? `<table>${cx.por_forma.map((f) => `<tr><td>${FORMAS[f.forma]}</td><td class="n">${brl(f.total)}</td></tr>`).join('')}</table>` : ''}
+      ${cx.esperado_dinheiro !== undefined ? `<p>Dinheiro esperado na gaveta: <b>${brl(cx.esperado_dinheiro)}</b></p>` : ''}
     </div>
     <div class="cartao"><h3 style="margin-top:0">Sangria / suprimento</h3>
       <form data-form="movimento"><div class="linha">
@@ -263,11 +271,11 @@ function barras(lista, rotulo = (x) => x.chave) {
 
 async function telaRelatorios() {
   const { de, ate, placa } = estado.rel;
-  const qs = `de=${de}&ate=${ate}`;
+  const datas = { p_de: de, p_ate: ate };
   const [r, caixas, locs] = await Promise.all([
-    api('GET', `/api/relatorios/resumo?${qs}`),
-    api('GET', `/api/relatorios/caixas?${qs}`),
-    api('GET', `/api/relatorios/locacoes?${qs}${placa ? `&placa=${encodeURIComponent(placa)}` : ''}`),
+    rpc('relatorio_resumo', datas),
+    rpc('relatorio_caixas', datas),
+    rpc('relatorio_locacoes', { ...datas, p_placa: placa || null }),
   ]);
   if (estado.aba !== 'relatorios') return;
   $('#conteudo').innerHTML = `
@@ -313,11 +321,11 @@ async function telaRelatorios() {
 }
 
 async function modalAuditoria() {
-  const lista = await tentar(() => api('GET', `/api/relatorios/auditoria?de=${estado.rel.de}&ate=${estado.rel.ate}`));
+  const lista = await tentar(() => rpc('relatorio_auditoria', { p_de: estado.rel.de, p_ate: estado.rel.ate }));
   if (!lista) return;
   abrirModal(`<h2>Registro de ações</h2><div class="rolagem"><table>
     ${lista.map((a) => `<tr><td>${dataHora(a.criado_em)}</td><td>${esc(a.usuario || '-')}</td><td>${esc(a.acao)}</td>
-      <td style="font-size:12px;word-break:break-word">${esc(a.detalhe || '')}</td></tr>`).join('')}</table></div>`);
+      <td style="font-size:12px;word-break:break-word">${esc(a.detalhe ? JSON.stringify(a.detalhe) : '')}</td></tr>`).join('')}</table></div>`);
 }
 
 // ---------- Configuração (admin) ----------
@@ -331,7 +339,7 @@ const CONFIG = {
   quartos: { titulo: 'Quartos', campos: [['numero', 'Número', 'text'], ['categoria_id', 'Categoria', 'categoria'], ['ativo', 'Ativo', 'bool']] },
   produtos: { titulo: 'Cardápio / frigobar', campos: [['nome', 'Nome', 'text'], ['preco', 'Preço R$', 'number'], ['ativo', 'Ativo', 'bool']] },
   usuarios: { titulo: 'Usuários', campos: [['nome', 'Nome', 'text'], ['login', 'Login', 'text'], ['papel', 'Função', 'papel'],
-    ['senha', 'Nova senha', 'password'], ['ativo', 'Ativo', 'bool']] },
+    ['senha', 'Nova senha', 'password'], ['pin', 'PIN gerente (4 a 8 números)', 'pin'], ['ativo', 'Ativo', 'bool']] },
 };
 
 async function telaConfig() {
@@ -339,7 +347,7 @@ async function telaConfig() {
   const abas = `<div class="sub-abas">${[...Object.entries(CONFIG).map(([k, v]) => [k, v.titulo]), ['geral', 'Geral']]
     .map(([k, n]) => `<button data-sub="${k}" class="${sub === k ? 'ativa' : ''}">${n}</button>`).join('')}</div>`;
   if (sub === 'geral') {
-    const cfg = await api('GET', '/api/admin-config');
+    const cfg = await rpc('admin_config');
     $('#conteudo').innerHTML = `${abas}<div class="cartao"><form data-form="config-geral">
       <label>Nome do motel</label><input name="nome_motel" value="${esc(cfg.nome_motel)}">
       <label>Dias para guardar a placa (depois disso ela é mascarada, LGPD)</label>
@@ -348,13 +356,14 @@ async function telaConfig() {
     return;
   }
   const def = CONFIG[sub];
-  const [linhas, categorias] = await Promise.all([api('GET', `/api/admin/${sub}`), api('GET', '/api/admin/categorias')]);
+  const [linhas, categorias] = await Promise.all([rpc('admin_listar', { p_entidade: sub }), rpc('admin_listar', { p_entidade: 'categorias' })]);
   if (estado.aba !== 'config' || estado.sub !== sub) return;
   const campo = (c, v) => {
     const [nome, , tipo] = c;
-    if (tipo === 'bool') return `<select name="${nome}"><option value="1" ${v ? 'selected' : ''}>Sim</option><option value="0" ${v === 0 ? 'selected' : ''}>Não</option></select>`;
+    if (tipo === 'bool') return `<select name="${nome}"><option value="1" ${v ? 'selected' : ''}>Sim</option><option value="0" ${v === false || v === 0 ? 'selected' : ''}>Não</option></select>`;
     if (tipo === 'categoria') return `<select name="${nome}">${categorias.map((k) => `<option value="${k.id}" ${k.id === v ? 'selected' : ''}>${esc(k.nome)}</option>`).join('')}</select>`;
     if (tipo === 'papel') return `<select name="${nome}">${['atendente', 'camareira', 'gerente', 'admin'].map((p) => `<option ${p === v ? 'selected' : ''}>${p}</option>`).join('')}</select>`;
+    if (tipo === 'pin') return `<input name="${nome}" type="password" inputmode="numeric" maxlength="8" placeholder="${v === undefined ? 'só gerente' : 'manter'}" autocomplete="off">`;
     if (tipo === 'password') return `<input name="${nome}" type="password" placeholder="${v === undefined ? 'obrigatória' : 'manter'}" autocomplete="new-password">`;
     return `<input name="${nome}" type="${tipo}" ${tipo === 'number' ? 'step="0.01"' : ''} value="${esc(v ?? '')}">`;
   };
@@ -373,10 +382,23 @@ async function salvarLinha(id) {
   for (const [nome, , tipo] of def.campos) {
     const el = tr.querySelector(`[name="${nome}"]`);
     if (tipo === 'password') { if (el.value) corpo.senha = el.value; continue; }
+    if (tipo === 'pin') { if (el.value) corpo.pin = el.value; continue; }
     corpo[nome] = ['number', 'bool', 'categoria'].includes(tipo) ? Number(el.value) : el.value;
   }
-  if (estado.sub === 'periodos' || estado.sub === 'quartos') corpo.categoria_id = Number(corpo.categoria_id);
-  const ok = await tentar(() => api(id ? 'PUT' : 'POST', `/api/admin/${estado.sub}${id ? `/${id}` : ''}`, corpo));
+  corpo.ativo = corpo.ativo === 1;
+  let ok;
+  if (estado.sub === 'usuarios') {
+    ok = await tentar(async () => {
+      const { data, error } = await supabase.functions.invoke('admin-usuarios', { body: { id: id || undefined, ...corpo } });
+      if (error) {
+        const msg = await error.context?.json?.().then((j) => j.erro).catch(() => null);
+        throw new Error(msg || error.message);
+      }
+      return data;
+    });
+  } else {
+    ok = await tentar(() => rpc('admin_salvar', { p_entidade: estado.sub, p_id: id, p_dados: corpo }));
+  }
   if (ok) { aviso('Salvo'); estado.tabela = null; telaConfig(); }
 }
 
@@ -389,7 +411,7 @@ document.addEventListener('click', async (ev) => {
   const d = alvo.dataset;
   switch (d.acao) {
     case 'fechar-modal': fecharModal(); break;
-    case 'sair': await tentar(() => api('POST', '/api/logout')); estado.usuario = null; render(); break;
+    case 'sair': await supabase.auth.signOut(); estado.usuario = null; estado.tabela = null; render(); break;
     case 'quarto': abrirQuarto(Number(d.id)); break;
     case 'opcao': {
       const form = alvo.closest('form');
@@ -409,7 +431,7 @@ document.addEventListener('click', async (ev) => {
       break;
     }
     case 'status':
-      if (await tentar(() => api('POST', `/api/quartos/${d.id}/status`, { status: d.status }))) { fecharModal(); telaQuartos(); }
+      if (await tentar(() => rpc('mudar_status_quarto', { p_quarto: Number(d.id), p_status: d.status }))) { fecharModal(); telaQuartos(); }
       break;
     case 'auditoria': modalAuditoria(); break;
     case 'minha-senha':
@@ -418,7 +440,7 @@ document.addEventListener('click', async (ev) => {
         <label>Nova senha (mínimo 6)</label><input name="nova" type="password" minlength="6" autocomplete="new-password" required>
         <div class="acoes"><button>Salvar</button></div></form>`);
       break;
-    case 'salvar-linha': salvarLinha(d.id ? Number(d.id) : null); break;
+    case 'salvar-linha': salvarLinha(d.id ? (estado.sub === 'usuarios' ? d.id : Number(d.id)) : null); break;
     default:
   }
 });
@@ -439,24 +461,27 @@ document.addEventListener('submit', async (ev) => {
     switch (form.dataset.form) {
       case 'login': {
         await tentar(async () => {
-          await api('POST', '/api/login', { login: f.login.value.trim(), senha: f.senha.value });
-          estado.usuario = await api('GET', '/api/eu');
+          const { error } = await supabase.auth.signInWithPassword({
+            email: f.login.value.trim().toLowerCase() + DOMINIO_LOGIN, password: f.senha.value,
+          });
+          if (error) throw new Error('Login ou senha incorretos');
+          estado.usuario = await rpc('eu_perfil');
           estado.aba = 'quartos'; render();
         });
         break;
       }
       case 'entrada': {
         if (!f.tipo.value) { aviso('Escolha o período', true); break; }
-        const ok = await tentar(() => api('POST', '/api/locacoes', {
-          quarto_id: Number(form.dataset.quarto), placa: f.placa.value, sem_veiculo: f.sem_veiculo.checked,
-          veiculo: f.veiculo.value, tipo: f.tipo.value, periodo_id: Number(f.periodo_id.value) || null,
+        const ok = await tentar(() => rpc('abrir_locacao', {
+          p_quarto: Number(form.dataset.quarto), p_placa: f.placa.value, p_sem_veiculo: f.sem_veiculo.checked,
+          p_veiculo: f.veiculo.value, p_tipo: f.tipo.value, p_periodo: Number(f.periodo_id.value) || null,
         }));
         if (ok) { fecharModal(); aviso('Entrada registrada'); telaQuartos(); }
         break;
       }
       case 'consumo': {
-        const ok = await tentar(() => api('POST', `/api/locacoes/${form.dataset.loc}/consumos`, {
-          produto_id: Number(botao.value), quantidade: Number(f.quantidade.value),
+        const ok = await tentar(() => rpc('lancar_consumo', {
+          p_locacao: Number(form.dataset.loc), p_produto: Number(botao.value), p_quantidade: Number(f.quantidade.value),
         }));
         if (ok) { fecharModal(); aviso('Consumo lançado'); await telaQuartos(); }
         break;
@@ -464,41 +489,50 @@ document.addEventListener('submit', async (ev) => {
       case 'fechar': {
         const pagamentos = Object.keys(FORMAS).map((k) => ({ forma: k, valor: Number(f[`pg_${k}`].value) || 0 })).filter((p) => p.valor > 0);
         const desconto = Number(f.desconto.value) || 0;
-        const ok = await tentar(() => api('POST', `/api/locacoes/${form.dataset.loc}/fechar`, {
-          pagamentos, desconto, desconto_motivo: f.desconto_motivo.value,
-          autorizacao: desconto ? { login: f.ger_login.value, senha: f.ger_senha.value } : undefined,
+        const ok = await tentar(() => rpc('fechar_locacao', {
+          p_locacao: Number(form.dataset.loc), p_pagamentos: pagamentos, p_desconto: desconto,
+          p_desconto_motivo: f.desconto_motivo.value || null,
+          p_gerente: desconto ? f.ger_login.value : null, p_pin: desconto ? f.ger_senha.value : null,
         }));
         if (ok) { fecharModal(); aviso(`Conta fechada: ${brl(ok.total)}`); telaQuartos(); }
         break;
       }
       case 'cancelar': {
-        const ok = await tentar(() => api('POST', `/api/locacoes/${form.dataset.loc}/cancelar`, {
-          motivo: f.motivo.value, autorizacao: { login: f.ger_login.value, senha: f.ger_senha.value },
+        const ok = await tentar(() => rpc('cancelar_locacao', {
+          p_locacao: Number(form.dataset.loc), p_motivo: f.motivo.value, p_gerente: f.ger_login.value, p_pin: f.ger_senha.value,
         }));
         if (ok) { fecharModal(); aviso('Locação cancelada'); telaQuartos(); }
         break;
       }
       case 'estornar': {
-        const ok = await tentar(() => api('POST', `/api/consumos/${form.dataset.id}/estornar`, {
-          motivo: f.motivo.value, autorizacao: { login: f.ger_login.value, senha: f.ger_senha.value },
+        const ok = await tentar(() => rpc('estornar_consumo', {
+          p_consumo: Number(form.dataset.id), p_motivo: f.motivo.value, p_gerente: f.ger_login.value, p_pin: f.ger_senha.value,
         }));
         if (ok) { fecharModal(); aviso('Consumo estornado'); telaQuartos(); }
         break;
       }
       case 'abrir-caixa':
-        if (await tentar(() => api('POST', '/api/caixa/abrir', { valor_inicial: Number(f.valor_inicial.value) }))) { aviso('Caixa aberto'); telaCaixa(); }
+        if (await tentar(() => rpc('abrir_caixa', { p_valor_inicial: Number(f.valor_inicial.value) }))) { aviso('Caixa aberto'); telaCaixa(); }
         break;
       case 'movimento':
-        if (await tentar(() => api('POST', '/api/caixa/movimento', { tipo: f.tipo.value, valor: Number(f.valor.value), motivo: f.motivo.value }))) { aviso('Registrado'); telaCaixa(); }
+        if (await tentar(() => rpc('movimento_caixa', { p_tipo: f.tipo.value, p_valor: Number(f.valor.value), p_motivo: f.motivo.value }))) { aviso('Registrado'); telaCaixa(); }
         break;
       case 'fechar-caixa': {
         if (!confirm('Fechar o caixa agora?')) break;
-        const ok = await tentar(() => api('POST', '/api/caixa/fechar', { valor_contado: Number(f.valor_contado.value) }));
+        const ok = await tentar(() => rpc('fechar_caixa', { p_valor_contado: Number(f.valor_contado.value) }));
         if (ok) { aviso(ok.diferenca !== undefined ? `Caixa fechado. Diferença: ${brl(ok.diferenca)}` : 'Caixa fechado'); telaCaixa(); }
         break;
       }
       case 'minha-senha':
-        if (await tentar(() => api('POST', '/api/minha-senha', { atual: f.atual.value, nova: f.nova.value }))) { fecharModal(); aviso('Senha alterada'); }
+        if (await tentar(async () => {
+          if (f.nova.value.length < 6) throw new Error('A nova senha precisa de ao menos 6 caracteres');
+          const conf = await supabase.auth.signInWithPassword({ email: estado.usuario.login + DOMINIO_LOGIN, password: f.atual.value });
+          if (conf.error) throw new Error('Senha atual incorreta');
+          const { error } = await supabase.auth.updateUser({ password: f.nova.value });
+          if (error) throw new Error(error.message);
+          await supabase.auth.signOut({ scope: 'others' });
+          return true;
+        })) { fecharModal(); aviso('Senha alterada'); }
         break;
       case 'periodo-rel':
         estado.rel.de = f.de.value; estado.rel.ate = f.ate.value || f.de.value; telaRelatorios();
@@ -507,8 +541,8 @@ document.addEventListener('submit', async (ev) => {
         estado.rel.placa = f.placa.value.trim(); telaRelatorios();
         break;
       case 'config-geral':
-        if (await tentar(() => api('PUT', '/api/admin-config', { nome_motel: f.nome_motel.value, dias_guardar_placa: f.dias_guardar_placa.value }))) {
-          aviso('Salvo'); estado.usuario = await api('GET', '/api/eu');
+        if (await tentar(() => rpc('admin_salvar_config', { p_dados: { nome_motel: f.nome_motel.value, dias_guardar_placa: f.dias_guardar_placa.value } }))) {
+          aviso('Salvo'); estado.usuario = await rpc('eu_perfil');
         }
         break;
       default:
@@ -526,6 +560,6 @@ setInterval(() => {
 }, 20000);
 
 (async () => {
-  try { estado.usuario = await api('GET', '/api/eu'); } catch { estado.usuario = null; }
+  estado.usuario = await carregarUsuario();
   render();
 })();

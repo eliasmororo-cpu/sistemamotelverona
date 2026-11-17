@@ -1,0 +1,4 @@
+project_id = "sistemamotelverona"
+
+[functions.admin-usuarios]
+verify_jwt = true
